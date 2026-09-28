@@ -52,15 +52,30 @@ enum AntennaHeadLink {
     }
 }
 
-/// ControlBooth's AirPlay relay, switched directly through its PCMUDPSender's
-/// control port. ControlBooth's AirPlay setting stays on "Receiving" (so it
-/// never announces itself to AntennaHead); the director turns the relay on
-/// only once its own 6031 receiver is listening, and off before it exits —
-/// PCMUDPSender exits if it sends to a port nobody is bound to.
-struct AirPlayRelay {
-    let control: UDPOut
+/// Gets Music.app's audio (via ControlBooth's AirPlay receiver) to the
+/// station's music port. The director calls `prepare` before it binds that
+/// port, `setRelay(true)` once it's listening, and `setRelay(false)` +
+/// `finish()` when it stops — ControlBooth's relay PCMUDPSender exits if it
+/// sends to a port nobody is bound to.
+@MainActor
+public protocol MusicRelay: AnyObject {
+    /// Point the AirPlay receiver's relay at `port` (relay still off).
+    func prepare(port: UInt16) async
+    func setRelay(_ on: Bool)
+    /// Give the receiver back to its normal settings.
+    func finish()
+}
 
-    init(port: UInt16) { control = UDPOut(port: port) }
+/// For the command-line tool: ControlBooth's AirPlay setting is left on
+/// "Receiving" with its Destination Port set to the station's music port by
+/// hand, and the relay is switched through its PCMUDPSender's control port.
+@MainActor
+public final class UDPRelayControl: MusicRelay {
+    private let control: UDPOut
 
-    func set(_ on: Bool) { control.send("relay \(on ? "on" : "off")\n") }
+    public init(port: UInt16) { control = UDPOut(port: port) }
+
+    public func prepare(port: UInt16) async {}
+    public func setRelay(_ on: Bool) { control.send("relay \(on ? "on" : "off")\n") }
+    public func finish() {}
 }

@@ -2,31 +2,33 @@ import Foundation
 
 /// `station.json`. Every key is optional: the file is deep-merged over
 /// `StationConfig.defaults`, so a config only needs the values it changes.
-struct StationConfig: Codable {
-    struct Ports: Codable {
+public struct StationConfig: Codable, Equatable, Sendable {
+    public struct Ports: Codable, Equatable, Sendable {
         /// ControlBooth's AirPlay relay sends Music.app's decoded PCM here.
-        var musicIn: UInt16
+        public var musicIn: UInt16
         /// Announcer PCM (48 kHz / 2 ch S16LE) into the mixer's sidechain input.
-        var announcerIn: UInt16
+        public var announcerIn: UInt16
         /// The station PCMMixer's control port (`gain 0 <g>` fades the music).
-        var mixerControl: UInt16
+        public var mixerControl: UInt16
         /// AntennaHead's ControlBooth receiver.
-        var antennaHead: UInt16
+        public var antennaHead: UInt16
         /// ControlBooth AirPlay relay's PCMUDPSender `--control-port`
         /// (`relay on` / `relay off`), fixed in AirPlayReceiverController.
-        var airPlayRelayControl: UInt16
+        public var airPlayRelayControl: UInt16
     }
 
     /// Passed straight to `PCMMixer --duck-*` (start: AntennaHead's filler values).
-    struct Duck: Codable {
-        var threshold: Double
-        var attenuation: Double
-        var attackMs: Int
-        var releaseMs: Int
-        var holdMs: Int
+    public struct Duck: Codable, Equatable, Sendable {
+        public var threshold: Double
+        public var attenuation: Double
+        public var attackMs: Int
+        public var releaseMs: Int
+        public var holdMs: Int
     }
 
-    enum Segment: String, Codable {
+    public enum Segment: String, Codable, CaseIterable, Identifiable, Sendable {
+        public var id: String { rawValue }
+
         /// Station ID, time, temperature, headlines. Music paused.
         case topOfHour
         /// Forecast. Music paused.
@@ -35,51 +37,56 @@ struct StationConfig: Codable {
         case stationID
     }
 
-    struct ClockEvent: Codable {
-        var minute: Int
-        var segment: Segment
+    public struct ClockEvent: Codable, Equatable, Sendable {
+        public var minute: Int
+        public var segment: Segment
+
+        public init(minute: Int, segment: Segment) {
+            self.minute = minute
+            self.segment = segment
+        }
     }
 
-    var stationName: String
-    var slogan: String
-    var playlist: String
-    var shuffle: Bool
+    public var stationName: String
+    public var slogan: String
+    public var playlist: String
+    public var shuffle: Bool
     /// Music.app's name for ControlBooth's AirPlay receiver.
-    var airPlayDeviceName: String
+    public var airPlayDeviceName: String
     /// How far behind Music.app's `player position` the audio reaches the
     /// mixer (AirPlay buffering). Talk-over timing adds this.
-    var airPlayLatencySeconds: Double
-    var latitude: Double
-    var longitude: Double
+    public var airPlayLatencySeconds: Double
+    public var latitude: Double
+    public var longitude: Double
     /// NWS requires a User-Agent with contact info.
-    var weatherUserAgent: String
-    var newsFeeds: [String]
-    var headlineCount: Int
-    var voice: String?
-    var speechRate: Double?
+    public var weatherUserAgent: String
+    public var newsFeeds: [String]
+    public var headlineCount: Int
+    public var voice: String?
+    public var speechRate: Double?
     /// Talk over the end of every Nth song (0 = never).
-    var talkOverEvery: Int
+    public var talkOverEvery: Int
     /// Speech ends this long before the song's audio does.
-    var talkOverEndGapSeconds: Double
+    public var talkOverEndGapSeconds: Double
     /// Skip a talk-over whose clip is longer than this.
-    var maxTalkOverSeconds: Double
+    public var maxTalkOverSeconds: Double
     /// A due clock segment waits for the current song to end, up to this
     /// long; after that the music is faded out for it.
-    var maxSegmentWaitSeconds: Double
+    public var maxSegmentWaitSeconds: Double
     /// Write the announcer's lines with Apple's on-device model (falls back
     /// to templates when unavailable or when a line fails the fact check).
-    var useAI: Bool
-    var clock: [ClockEvent]
-    var ports: Ports
-    var duck: Duck
-    var helpersPath: String
+    public var useAI: Bool
+    public var clock: [ClockEvent]
+    public var ports: Ports
+    public var duck: Duck
+    public var helpersPath: String
     /// Overrides `helpersPath` for PCMSpeechSynth only (e.g. a PipelineHelpers
     /// build newer than the one bundled in AntennaHead).
-    var speechSynthPath: String?
+    public var speechSynthPath: String?
     /// The source name AntennaHead shows ("ControlBooth: <name>").
-    var antennaHeadSourceName: String
+    public var antennaHeadSourceName: String
 
-    static let defaults = StationConfig(
+    public static let defaults = StationConfig(
         stationName: "AntennaHead Radio",
         slogan: "your station, on your own terms",
         playlist: "Music",
@@ -110,25 +117,30 @@ struct StationConfig: Codable {
         duck: Duck(threshold: 0.02, attenuation: 0.25, attackMs: 40, releaseMs: 400, holdMs: 250),
         helpersPath: "/Applications/AntennaHead.app/Contents/Helpers",
         speechSynthPath: nil,
-        antennaHeadSourceName: "Station"
+        antennaHeadSourceName: "AntennaHead Radio"
     )
 
-    static func load(path: String?) throws -> StationConfig {
-        let base = try JSONSerialization.jsonObject(with: JSONEncoder().encode(defaults)) as! [String: Any]
+    public static func load(path: String?) throws -> StationConfig {
         guard let path else { return defaults }
         let data = try Data(contentsOf: URL(fileURLWithPath: (path as NSString).expandingTildeInPath))
-        guard let user = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            throw DirectorError("\(path): top level must be a JSON object")
-        }
-        let merged = deepMerge(base, user)
-        var config = try JSONDecoder().decode(StationConfig.self,
-                                              from: JSONSerialization.data(withJSONObject: merged))
+        var config = try merged(json: data)
         // Relative paths are relative to the config file.
         let dir = URL(fileURLWithPath: (path as NSString).expandingTildeInPath).deletingLastPathComponent()
         if let p = config.speechSynthPath, !p.hasPrefix("/"), !p.hasPrefix("~") {
             config.speechSynthPath = dir.appendingPathComponent(p).standardizedFileURL.path
         }
         return config
+    }
+
+    /// Decodes `json` deep-merged over `defaults`, so a partial or older
+    /// settings object still loads (keys it lacks take their defaults).
+    public static func merged(json data: Data) throws -> StationConfig {
+        let base = try JSONSerialization.jsonObject(with: JSONEncoder().encode(defaults)) as! [String: Any]
+        guard let user = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw DirectorError("station settings: top level must be a JSON object")
+        }
+        return try JSONDecoder().decode(StationConfig.self,
+                                        from: JSONSerialization.data(withJSONObject: deepMerge(base, user)))
     }
 
     private static func deepMerge(_ base: [String: Any], _ over: [String: Any]) -> [String: Any] {
@@ -143,25 +155,25 @@ struct StationConfig: Codable {
         return out
     }
 
-    func helper(_ name: String) -> String {
+    public func helper(_ name: String) -> String {
         if name == "PCMSpeechSynth", let speechSynthPath { return (speechSynthPath as NSString).expandingTildeInPath }
         return (helpersPath as NSString).appendingPathComponent(name)
     }
 }
 
-struct DirectorError: Error, CustomStringConvertible {
-    let description: String
-    init(_ description: String) { self.description = description }
+public struct DirectorError: Error, CustomStringConvertible {
+    public let description: String
+    public init(_ description: String) { self.description = description }
 }
 
-enum Log {
-    private static let formatter: DateFormatter = {
+/// Where StationKit's log lines go. The default prints them to stderr with a
+/// timestamp; ControlBooth routes them to its log window and the Radio tab.
+public enum Log {
+    nonisolated(unsafe) public static var handler: @Sendable (String) -> Void = { message in
         let f = DateFormatter()
         f.dateFormat = "HH:mm:ss"
-        return f
-    }()
-
-    static func info(_ message: String) {
-        FileHandle.standardError.write(Data("[\(formatter.string(from: Date()))] \(message)\n".utf8))
+        FileHandle.standardError.write(Data("[\(f.string(from: Date()))] \(message)\n".utf8))
     }
+
+    public static func info(_ message: String) { handler(message) }
 }

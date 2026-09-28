@@ -1,6 +1,17 @@
 # StationDirector
 
-First-hour prototype of AntennaHead station automation. The design is in
+AntennaHead station automation ("AntennaHead Radio"). The station itself is
+the **StationKit** library; ControlBooth runs it from its **AntennaHead Radio**
+tab (settings, Go On Air / Stop, Run Now, live status and log), which is the
+normal way to use it. The `station-director` CLI below runs the same code from
+a terminal, for testing.
+
+Inside ControlBooth the station also handles the AirPlay receiver itself: it
+restarts the receiver relaying to the station's music port (no manual port
+setup, and no stale AirPlay session), then restores the saved AirPlay settings
+when it stops. The CLI can't do that, so it still needs the manual setup below.
+
+The rest of this README describes the prototype as a CLI. The design is in
 `../antennahead-workspace/STATION_AUTOMATION_DESIGN.md`. This is a standalone
 Swift CLI; the plan is to fold it into ControlBooth later.
 

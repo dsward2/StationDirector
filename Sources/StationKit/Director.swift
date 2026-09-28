@@ -1,4 +1,5 @@
 import Foundation
+import Observation
 
 /// The hour clock. Polls Music.app four times a second and decides when to
 /// talk over a song's ending and when to stop the music for a clock segment.
@@ -12,14 +13,46 @@ import Foundation
 /// mutes the music, the segment speaks, Music seeks that track back to 0 one
 /// latency before the voice ends, and the music is unmuted as the voice ends.
 @MainActor
-final class Director {
-    struct Options {
-        var output: AudioGraph.Output
-        var announceToAntennaHead: Bool
-        var controlMusic: Bool
-        var fireAtStart: StationConfig.Segment?
-        var runMinutes: Double?
+@Observable
+public final class Director {
+    public struct Options {
+        public var output: AudioGraph.Output
+        public var announceToAntennaHead: Bool
+        public var controlMusic: Bool
+        public var fireAtStart: StationConfig.Segment?
+        public var runMinutes: Double?
+
+        public init(output: AudioGraph.Output, announceToAntennaHead: Bool, controlMusic: Bool,
+                    fireAtStart: StationConfig.Segment? = nil, runMinutes: Double? = nil) {
+            self.output = output
+            self.announceToAntennaHead = announceToAntennaHead
+            self.controlMusic = controlMusic
+            self.fireAtStart = fireAtStart
+            self.runMinutes = runMinutes
+        }
     }
+
+    public enum Phase: Equatable, Sendable {
+        case starting
+        case onAir
+        case segment(StationConfig.Segment)
+        case stopping
+        case stopped
+    }
+
+    // MARK: Status (for a UI)
+
+    public private(set) var phase: Phase = .stopped
+    /// "Title — Artist" of the song Music.app is playing.
+    public private(set) var nowPlaying: String?
+    /// The announcer's most recent line.
+    public private(set) var lastLine: String?
+    /// The AirPlay latency in use (measured at startup when possible).
+    public private(set) var latency: Double
+    /// Segments waiting for a song boundary.
+    public var pendingSegments: [StationConfig.Segment] { pending.map(\.segment) }
+    /// Why the station stopped on its own, if it did.
+    public private(set) var failure: String?
 
     private struct PendingSegment {
         let segment: StationConfig.Segment
@@ -34,9 +67,7 @@ final class Director {
     private let music = MusicPlayer()
     private let weather: Weather
     private let copy: Copywriter
-    private let relay: AirPlayRelay
-    /// Starts at the config value; replaced by the measured value at startup.
-    private var latency: Double
+    private let relay: MusicRelay?
 
     private var stopping = false
     private var fatal: String?
@@ -56,41 +87,109 @@ final class Director {
     /// Music-stopping segments waiting for a song boundary, in due order.
     private var pending: [PendingSegment] = []
     private var firedClockKeys = Set<String>()
-    private var signalSources: [DispatchSourceSignal] = []
     /// Music.app's AirPlay selection before the station took it over.
     private var previousAirPlayDevices: [String] = []
 
-    init(config: StationConfig, options: Options) {
+    /// `relay` is required when `options.controlMusic` is on.
+    public init(config: StationConfig, options: Options, relay: MusicRelay?) {
         self.config = config
         self.options = options
         graph = AudioGraph(config: config, output: options.output)
         announcer = Announcer(config: config)
         weather = Weather(config: config)
         copy = Copywriter(useAI: config.useAI)
-        relay = AirPlayRelay(port: config.ports.airPlayRelayControl)
+        self.relay = relay
         latency = config.airPlayLatencySeconds
+    }
+
+    /// Asks a running station to stop; `run()` returns once it has.
+    public func stop() {
+        guard phase != .stopped else { return }
+        stopping = true
+        phase = .stopping
+    }
+
+    /// Synchronous last-ditch stop for app termination, when `run()` won't
+    /// get another turn: pauses Music, gives the AirPlay receiver back, and
+    /// tells AntennaHead the source is gone. The helpers exit with the app.
+    public func stopImmediately() {
+        guard phase != .stopped else { return }
+        if options.controlMusic {
+            try? music.pause()
+            if !previousAirPlayDevices.isEmpty, previousAirPlayDevices != [config.airPlayDeviceName] {
+                try? music.selectAirPlayDevices(named: previousAirPlayDevices)
+            }
+            relay?.setRelay(false)
+        }
+        graph.stop()
+        if options.controlMusic { relay?.finish() }
+        if options.announceToAntennaHead {
+            AntennaHeadLink.stopListening(config.antennaHeadSourceName)
+        }
+        stopping = true
+        phase = .stopped
+    }
+
+    /// Runs `segment` now — at the next song boundary for the music-stopping
+    /// ones, over the end of the current song for a station ID.
+    public func fire(_ segment: StationConfig.Segment) {
+        guard phase != .stopped, phase != .stopping else { return }
+        queue(segment, due: Date())
     }
 
     // MARK: Lifecycle
 
-    func run() async throws {
-        installSignalHandlers()
+    public func run() async throws {
+        phase = .starting
+        failure = nil
+        do {
+            try await start()
+        } catch {
+            failure = "\(error)"
+            await shutdown()
+            throw error
+        }
+        phase = stopping ? .stopping : .onAir
+
+        let started = Date()
+        while !stopping && fatal == nil {
+            if let minutes = options.runMinutes, Date().timeIntervalSince(started) > minutes * 60 { break }
+            do {
+                try await tick()
+            } catch {
+                Log.info("tick: \(error)")
+            }
+            try? await Task.sleep(for: .milliseconds(250))
+        }
+        if let fatal {
+            Log.info("stopping: \(fatal)")
+            failure = fatal
+        }
+        await shutdown()
+    }
+
+    private func start() async throws {
         if options.announceToAntennaHead {
             guard AntennaHeadLink.isRunning else { throw DirectorError("AntennaHead is not running") }
-            try AntennaHeadLink.startListening(config.antennaHeadSourceName)
+            // Off the main actor: the send blocks until AntennaHead has bound its receiver.
+            let name = config.antennaHeadSourceName
+            try await Task.detached(priority: .userInitiated) { try AntennaHeadLink.startListening(name) }.value
             Log.info("AntennaHead is listening to '\(config.antennaHeadSourceName)'")
         }
         graph.onExit = { [weak self] reason in
             Task { @MainActor in self?.fatal = reason }
         }
+        if options.controlMusic, let relay {
+            await relay.prepare(port: config.ports.musicIn)
+        }
         try graph.start()
         try await Task.sleep(for: .milliseconds(300))
 
         if options.controlMusic {
-            relay.set(true)
+            relay?.setRelay(true)
             Log.info("AirPlay relay on (ControlBooth → udp:\(config.ports.musicIn))")
             previousAirPlayDevices = music.selectedAirPlayDevices()
-            try music.selectAirPlayDevice(named: config.airPlayDeviceName)
+            try await selectAirPlayDevice()
             graph.armSoundDetector()
             try music.play(playlist: config.playlist, shuffle: config.shuffle)
             Log.info("Music.app → AirPlay '\(config.airPlayDeviceName)', playlist '\(config.playlist)'"
@@ -105,22 +204,30 @@ final class Director {
             let line = await copy.stationID(facts)
             if let clip = try? await announcer.render(line) {
                 try? await Task.sleep(for: .seconds(1))
-                await announcer.play(clip)
+                await speak(clip)
             }
         }
+    }
 
-        let started = Date()
-        while !stopping && fatal == nil {
-            if let minutes = options.runMinutes, Date().timeIntervalSince(started) > minutes * 60 { break }
+    /// Selects the station's AirPlay device, retrying while it (re)appears —
+    /// a just-restarted receiver takes a few seconds to be advertised again.
+    private func selectAirPlayDevice() async throws {
+        var lastError: Error?
+        for _ in 0..<30 {
             do {
-                try await tick()
+                try music.selectAirPlayDevice(named: config.airPlayDeviceName)
+                return
             } catch {
-                Log.info("tick: \(error)")
+                lastError = error
+                try? await Task.sleep(for: .milliseconds(500))
             }
-            try? await Task.sleep(for: .milliseconds(250))
         }
-        if let fatal { Log.info("stopping: \(fatal)") }
-        shutdown()
+        throw lastError ?? DirectorError("AirPlay device '\(config.airPlayDeviceName)' not found")
+    }
+
+    private func speak(_ clip: Clip) async {
+        lastLine = clip.text
+        await announcer.play(clip)
     }
 
     /// Time from Music.app's playhead to sound at the mixer: the first sound
@@ -157,7 +264,8 @@ final class Director {
                  + "and that Music.app is playing to '\(config.airPlayDeviceName)'; using \(latency)s")
     }
 
-    private func shutdown() {
+    private func shutdown() async {
+        phase = .stopping
         Log.info("shutting down")
         if options.controlMusic {
             try? music.pause()
@@ -166,26 +274,17 @@ final class Director {
             if !previousAirPlayDevices.isEmpty, previousAirPlayDevices != [config.airPlayDeviceName] {
                 try? music.selectAirPlayDevices(named: previousAirPlayDevices)
             }
-            relay.set(false)
-            Thread.sleep(forTimeInterval: 0.3)     // let the relay-off land before 6031 closes
+            relay?.setRelay(false)
+            try? await Task.sleep(for: .milliseconds(300))   // let the relay-off land before the port closes
         }
         graph.stop()
+        if options.controlMusic { relay?.finish() }
         if options.announceToAntennaHead {
             AntennaHeadLink.nowPlaying("", source: config.antennaHeadSourceName)
             AntennaHeadLink.stopListening(config.antennaHeadSourceName)
         }
-    }
-
-    private func installSignalHandlers() {
-        for sig in [SIGINT, SIGTERM] {
-            signal(sig, SIG_IGN)
-            let source = DispatchSource.makeSignalSource(signal: sig, queue: .main)
-            source.setEventHandler { [weak self] in
-                MainActor.assumeIsolated { self?.stopping = true }
-            }
-            source.resume()
-            signalSources.append(source)
-        }
+        nowPlaying = nil
+        phase = .stopped
     }
 
     // MARK: Clock
@@ -232,7 +331,7 @@ final class Director {
                 Log.info("talk-over missed its window (\(String(format: "%.1f", audibleRemaining))s left)")
                 return
             }
-            Task { await announcer.play(clip) }
+            Task { await speak(clip) }
         }
     }
 
@@ -268,7 +367,7 @@ final class Director {
             prepareTalkOver { await clip.value }
             talkOverDue = false          // the ID replaces this song's talk-over
             if !options.controlMusic {
-                Task { if let c = await clip.value { await announcer.play(c) } }
+                Task { if let c = await clip.value { await speak(c) } }
             }
         } else {
             pending.append(PendingSegment(segment: segment, due: due, clip: clip))
@@ -280,6 +379,7 @@ final class Director {
         trackStartedAt[track.id] = Date()
         songCount += 1
         Log.info("♪ \(track.name) — \(track.artist)  [\(Int(track.duration))s]")
+        nowPlaying = "\(track.name) — \(track.artist)"
         if options.announceToAntennaHead {
             AntennaHeadLink.nowPlaying("\(track.name) — \(track.artist)", source: config.antennaHeadSourceName)
         }
@@ -330,6 +430,8 @@ final class Director {
         prepareTalkOver { nil }
         talkOverDue = false
 
+        phase = .segment(segment.segment)
+        defer { if phase == .segment(segment.segment) { phase = .onAir } }
         let musicWasPlaying = options.controlMusic && state.playing
         if musicWasPlaying {
             if overdue {
@@ -353,7 +455,7 @@ final class Director {
             try? await Task.sleep(for: .seconds(seekAfter))
             if musicWasPlaying { try? music.seekToStart() }
         }
-        if let clip { await announcer.play(clip) }
+        if let clip { await speak(clip) }
         _ = await seekTask.value
         let unmuteIn = seekAfter + latency - duration
         if unmuteIn > 0 { try? await Task.sleep(for: .seconds(unmuteIn)) }
@@ -380,7 +482,7 @@ final class Director {
                      justPlayed: nil, upNext: nil)
     }
 
-    func segmentText(_ segment: StationConfig.Segment) async -> String {
+    public func segmentText(_ segment: StationConfig.Segment) async -> String {
         let facts = await makeFacts()
         switch segment {
         case .stationID:
@@ -394,18 +496,17 @@ final class Director {
         }
     }
 
-    /// Prints every line the next hour would use, without audio.
-    func preview() async {
+    /// Every line the next hour would use, as text; no audio.
+    public func preview() async -> String {
         let facts = await makeFacts()
-        print("Facts:\n\(facts.listing)\n")
+        var out = "Facts:\n\(facts.listing)\n\n"
         for event in config.clock {
-            print(":\(String(format: "%02d", event.minute)) \(event.segment):\n  \(await segmentText(event.segment))\n")
+            out += ":\(String(format: "%02d", event.minute)) \(event.segment.rawValue):\n  \(await segmentText(event.segment))\n\n"
         }
         var f = facts
         f.justPlayed = ("Dreams", "Fleetwood Mac")
-        print("talk-over (sample):\n  \(await copy.talkOver(f))")
-        f.upNext = ("Do It Again", "Steely Dan")
-        print("talk-over with up-next (sample):\n  \(await copy.talkOver(f))")
+        out += "talk-over (sample):\n  \(await copy.talkOver(f))\n"
+        return out
     }
 }
 

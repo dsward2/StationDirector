@@ -15,11 +15,11 @@ struct Clip {
 /// paced by this process. That gives the exact clip length before it plays,
 /// which is what talk-over timing needs, and an exact "done" moment — the
 /// §8 item 6 end-of-speech problem goes away without a PipelineHelpers change.
-final class Announcer {
+public final class Announcer {
     private let config: StationConfig
     private let out: UDPOut
 
-    init(config: StationConfig) {
+    public init(config: StationConfig) {
         self.config = config
         out = UDPOut(port: config.ports.announcerIn)
     }
@@ -73,7 +73,7 @@ final class Announcer {
         if remaining > 0 { Thread.sleep(forTimeInterval: remaining) }
     }
 
-    func speak(_ text: String) async throws {
+    public func speak(_ text: String) async throws {
         await play(try await render(text))
     }
 
