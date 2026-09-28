@@ -180,7 +180,13 @@ public struct StationConfig: Codable, Equatable, Sendable {
 
 public struct DirectorError: Error, CustomStringConvertible {
     public let description: String
-    public init(_ description: String) { self.description = description }
+    /// A remote Mac briefly refusing a connection: worth retrying, and only
+    /// worth reporting if it keeps happening.
+    public var isTransient = false
+    public init(_ description: String, isTransient: Bool = false) {
+        self.description = description
+        self.isTransient = isTransient
+    }
 }
 
 /// Where StationKit's log lines go. The default prints them to stderr with a

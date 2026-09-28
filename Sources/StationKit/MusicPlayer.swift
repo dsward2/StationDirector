@@ -264,9 +264,17 @@ public final class MusicPlayer {
             if compiled.count < 32 { compiled[source] = fresh }
             script = fresh
         }
-        let result = script.executeAndReturnError(&error)
+        var result = script.executeAndReturnError(&error)
+        if target.isRemote, let first = error, Self.isConnectionHiccup(first) {
+            // A remote Mac now and then refuses one event (-905 and friends)
+            // and answers the next; retry once before giving up.
+            Thread.sleep(forTimeInterval: 0.2)
+            error = nil
+            result = script.executeAndReturnError(&error)
+        }
         if let error {
-            throw DirectorError(Self.describe(error, target: target))
+            throw DirectorError(Self.describe(error, target: target),
+                                isTransient: target.isRemote && Self.isConnectionHiccup(error))
         }
         return result.stringValue ?? ""
     }
@@ -298,6 +306,13 @@ public final class MusicPlayer {
             }
         }
         return done.wait(timeout: .now() + timeout) == .success && box.ok
+    }
+
+    /// Connection-level Remote Apple Events errors that are usually momentary
+    /// when they come from a Mac that was just answering: -903 no port,
+    /// -905 remote access refused, -906 destination port, -609 connection invalid.
+    private static func isConnectionHiccup(_ error: NSDictionary) -> Bool {
+        [-903, -905, -906, -609].contains((error[NSAppleScript.errorNumber] as? Int) ?? 0)
     }
 
     /// AppleScript errors in words, with the likely fix for the common ones.
