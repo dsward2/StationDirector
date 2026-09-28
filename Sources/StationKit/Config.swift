@@ -51,6 +51,15 @@ public struct StationConfig: Codable, Equatable, Sendable {
     public var slogan: String
     public var playlist: String
     public var shuffle: Bool
+    /// The Mac whose Music (or iTunes) plays the station's music; nil or
+    /// empty = this Mac. A host name, Bonjour name or address, reached with
+    /// Remote Apple Events. See `MusicTarget`.
+    public var musicHost: String?
+    /// Account on `musicHost`. The password is never stored here: the host
+    /// app passes it at runtime (ControlBooth keeps it in the Keychain).
+    public var musicHostUser: String?
+    /// "Music", or "iTunes" on an older Mac.
+    public var musicApp: String?
     /// Music.app's name for ControlBooth's AirPlay receiver.
     public var airPlayDeviceName: String
     /// How far behind Music.app's `player position` the audio reaches the
@@ -91,14 +100,17 @@ public struct StationConfig: Codable, Equatable, Sendable {
         slogan: "your station, on your own terms",
         playlist: "Music",
         shuffle: true,
+        musicHost: nil,
+        musicHostUser: nil,
+        musicApp: "Music",
         airPlayDeviceName: "ControlBooth",
         airPlayLatencySeconds: 2.0,
         latitude: 34.7465,
         longitude: -92.2896,
         weatherUserAgent: "AntennaHead-StationDirector (https://github.com/dsward2)",
         newsFeeds: [
-            "https://feeds.npr.org/1001/rss.xml",
-            "https://www.kark.com/feed/",
+            "NPR | https://feeds.npr.org/1001/rss.xml",
+            "KARK | https://www.kark.com/feed/",
         ],
         headlineCount: 3,
         voice: "com.apple.voice.premium.en-US.Ava",
@@ -153,6 +165,11 @@ public struct StationConfig: Codable, Equatable, Sendable {
             }
         }
         return out
+    }
+
+    public func musicTarget(password: String?) -> MusicTarget {
+        MusicTarget(host: musicHost, user: musicHostUser, password: password,
+                    appName: (musicApp ?? "").isEmpty ? "Music" : musicApp!)
     }
 
     public func helper(_ name: String) -> String {

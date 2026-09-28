@@ -8,7 +8,12 @@ station-director — AntennaHead station automation (first-hour prototype)
                            [--no-music] [--fire topOfHour|weather|stationID] [--minutes <n>]
   station-director preview [--config station.json]   print the hour's lines; no audio
   station-director say     [--config station.json] <text>   speak into a running station
+  station-director test-music [--config station.json] [--music-host <host>]   check the music source
   station-director config                             print the effective default config
+
+The music source is Music on this Mac unless the config's musicHost names
+another Mac (Remote Apple Events); its password comes from the
+STATION_MUSIC_PASSWORD environment variable, or macOS asks.
 
 run: announces the "Station" source to AntennaHead, starts the audio graph
 (PCMUDPReceiver udp:6031 + PCMMixer with the announcer on udp:6032), switches
@@ -34,7 +39,9 @@ func takeFlag(_ flag: String) -> Bool {
 }
 
 do {
-    let config = try StationConfig.load(path: take("--config"))
+    var config = try StationConfig.load(path: take("--config"))
+    if let host = take("--music-host") { config.musicHost = host }
+    let musicPassword = ProcessInfo.processInfo.environment["STATION_MUSIC_PASSWORD"]
     switch command {
     case "run":
         let outputArg = take("--output") ?? "antennahead"
@@ -57,7 +64,8 @@ do {
                                        announceToAntennaHead: outputArg == "antennahead",
                                        controlMusic: !takeFlag("--no-music"),
                                        fireAtStart: fire,
-                                       runMinutes: take("--minutes").flatMap(Double.init))
+                                       runMinutes: take("--minutes").flatMap(Double.init),
+                                       musicPassword: musicPassword)
         let director = Director(config: config, options: options,
                                 relay: UDPRelayControl(port: config.ports.airPlayRelayControl))
         // Ctrl-C / kill: stop cleanly (Music, the relay, AntennaHead's source).
@@ -78,6 +86,11 @@ do {
         let text = args.joined(separator: " ")
         guard !text.isEmpty else { throw DirectorError("say: no text") }
         try await Announcer(config: config).speak(text)
+    case "test-music":
+        let music = MusicPlayer(target: config.musicTarget(password: musicPassword))
+        print(try music.testConnection())
+        print("playlists: \(music.playlistNames().prefix(8).joined(separator: ", "))")
+        print("AirPlay devices: \(music.airPlayDeviceNames().joined(separator: ", "))")
     case "config":
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]

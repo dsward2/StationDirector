@@ -21,9 +21,13 @@ public final class Director {
         public var controlMusic: Bool
         public var fireAtStart: StationConfig.Segment?
         public var runMinutes: Double?
+        /// Password for `config.musicHost`, if it's another Mac.
+        public var musicPassword: String?
 
         public init(output: AudioGraph.Output, announceToAntennaHead: Bool, controlMusic: Bool,
-                    fireAtStart: StationConfig.Segment? = nil, runMinutes: Double? = nil) {
+                    fireAtStart: StationConfig.Segment? = nil, runMinutes: Double? = nil,
+                    musicPassword: String? = nil) {
+            self.musicPassword = musicPassword
             self.output = output
             self.announceToAntennaHead = announceToAntennaHead
             self.controlMusic = controlMusic
@@ -64,7 +68,7 @@ public final class Director {
     private let options: Options
     private let graph: AudioGraph
     private let announcer: Announcer
-    private let music = MusicPlayer()
+    private let music: MusicPlayer
     private let weather: Weather
     private let copy: Copywriter
     private let relay: MusicRelay?
@@ -99,6 +103,7 @@ public final class Director {
         weather = Weather(config: config)
         copy = Copywriter(useAI: config.useAI)
         self.relay = relay
+        music = MusicPlayer(target: config.musicTarget(password: options.musicPassword))
         latency = config.airPlayLatencySeconds
     }
 
@@ -192,7 +197,7 @@ public final class Director {
             try await selectAirPlayDevice()
             graph.armSoundDetector()
             try music.play(playlist: config.playlist, shuffle: config.shuffle)
-            Log.info("Music.app → AirPlay '\(config.airPlayDeviceName)', playlist '\(config.playlist)'"
+            Log.info("\(music.target.displayName) → AirPlay '\(config.airPlayDeviceName)', playlist '\(config.playlist)'"
                      + (config.shuffle ? " (shuffle)" : ""))
             await measureLatency()
         }

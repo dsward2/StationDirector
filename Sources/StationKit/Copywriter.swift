@@ -76,7 +76,7 @@ final class Copywriter {
             """)
     }
 
-    func topOfHour(_ f: Facts, hour: String, headlines: [String]) async -> String {
+    func topOfHour(_ f: Facts, hour: String, headlines: [Headline]) async -> String {
         var parts = ["It's \(hour), and this is \(f.stationName), \(f.slogan)."]
         if let t = f.temperatureF {
             let place = f.city.map { " in \($0)" } ?? ""
@@ -84,7 +84,13 @@ final class Copywriter {
         }
         if !headlines.isEmpty {
             parts.append("Here's the news.")
-            for h in headlines { parts.append(await radioHeadline(h)) }
+            var previousSource: String?
+            for h in headlines {
+                // Credit each story's source; "Also from" when it repeats.
+                let credit = h.source == previousSource ? "Also from \(h.source):" : "From \(h.source):"
+                parts.append("\(credit) \(await radioHeadline(h.title))")
+                previousSource = h.source
+            }
         }
         parts.append("More music now, on \(f.stationName).")
         return parts.joined(separator: " ")
