@@ -17,6 +17,5 @@
   "clock": [
     { "minute": 0,  "segment": "topOfHour" },
     { "minute": 30, "segment": "weather" }
-  ],
-  "speechSynthPath": "../PipelineHelpers/.build/release/PCMSpeechSynth"
+  ]
 }

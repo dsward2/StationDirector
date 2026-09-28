@@ -54,10 +54,9 @@ Differences from the design doc:
 ## One-time setup
 
 1. ControlBooth › AirPlay settings: **Destination Port 6031**, mode **Receiving**.
-2. Build: `swift build` (and, until PipelineHelpers#18 ships in AntennaHead,
-   `swift build -c release --product PCMSpeechSynth` in `../PipelineHelpers`;
-   `station.example.json` points `speechSynthPath` at that build. The
-   bundled PCMSpeechSynth cuts off anything longer than about 15 s).
+2. Build: `swift build`. AntennaHead must include PipelineHelpers#18 (merged
+   2026-09-27); older bundled PCMSpeechSynth cuts off anything longer than
+   about 15 s. `speechSynthPath` in `station.json` can point at another build.
 3. `cp station.example.json station.json` and edit. Every key is optional.
    `station-director config` prints all keys and their defaults.
 4. First run: allow the Automation prompts (Music, AntennaHead).
