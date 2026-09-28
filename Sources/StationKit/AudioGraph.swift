@@ -181,6 +181,12 @@ public final class AudioGraph {
             }
         }
         thread.name = "mixer-output"
+        // Every block of the station's audio passes through here, so it must
+        // not fall behind: when it does, the mixer blocks, the fill-silence
+        // receiver skips the missed time, and AntennaHead gets less than
+        // real-time audio (late HLS segments, stalled players). The host app
+        // should also hold a ProcessInfo activity while on air (App Nap).
+        thread.qualityOfService = .userInteractive
         thread.start()
     }
 }
