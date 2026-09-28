@@ -67,6 +67,10 @@ public final class AudioGraph {
     private let control: UDPOut
     private(set) var musicGain = 1.0
     var onExit: ((String) -> Void)?
+    /// Set by `stopOutput()`: the forwarder drops everything from then on,
+    /// including audio still queued in the mixer's pipe.
+    private let outputLock = NSLock()
+    private var outputStopped = false
     private let detectorLock = NSLock()
     private var detectorArmed = false
     private var soundAt: Date?
@@ -111,6 +115,14 @@ public final class AudioGraph {
         startForwarding(out.fileHandleForReading)
         Log.info("audio graph up: music udp:\(p.musicIn) + announcer udp:\(p.announcerIn) → "
                  + describe(output) + ", mixer control udp:\(p.mixerControl)")
+    }
+
+    /// Stops sending to the output at once and stops the helpers — for when
+    /// another source is taking AntennaHead's input and two streams must not
+    /// interleave there even briefly.
+    func stopOutput() {
+        outputLock.withLock { outputStopped = true }
+        stop()
     }
 
     func stop() {
@@ -176,6 +188,7 @@ public final class AudioGraph {
             while true {
                 let data = handle.availableData
                 if data.isEmpty { break }
+                if self.outputLock.withLock({ self.outputStopped }) { continue }
                 self.detectSound(data)
                 sink(data)
             }

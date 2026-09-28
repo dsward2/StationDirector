@@ -114,6 +114,19 @@ public final class Director {
         phase = .stopping
     }
 
+    /// Another source is taking AntennaHead's input: stops sending to it
+    /// immediately (so two streams never interleave in AntennaHead's
+    /// receiver), then stops the station as `stop()` does. Pausing Music and
+    /// giving the AirPlay receiver back happen in `run()`'s shutdown, so this
+    /// never waits on Music (a remote Mac can take seconds to answer).
+    /// AntennaHead ignores the station's closing 'Stop'/'NpUp' once another
+    /// source is current, so the new source isn't disturbed.
+    public func releaseOutput() {
+        guard phase != .stopped else { return }
+        graph.stopOutput()
+        stop()
+    }
+
     /// Synchronous last-ditch stop for app termination, when `run()` won't
     /// get another turn: pauses Music, gives the AirPlay receiver back, and
     /// tells AntennaHead the source is gone. The helpers exit with the app.
