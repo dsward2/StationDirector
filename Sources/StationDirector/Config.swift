@@ -82,7 +82,7 @@ struct StationConfig: Codable {
     static let defaults = StationConfig(
         stationName: "AntennaHead Radio",
         slogan: "your station, on your own terms",
-        playlist: "Recently Added",
+        playlist: "Music",
         shuffle: true,
         airPlayDeviceName: "ControlBooth",
         airPlayLatencySeconds: 2.0,

@@ -4,11 +4,13 @@ import Foundation
 /// talk over a song's ending and when to stop the music for a clock segment.
 ///
 /// AirPlay timing: what the mixer hears lags Music.app's `player position` by
-/// `airPlayLatencySeconds`, and pausing makes shairport-sync FLUSH whatever
-/// it's still holding. So a segment never pauses at the end of a song (that
-/// would cut its last ~2 s); it pauses once the *next* track has run for
-/// just under the latency — the old song has played out, and the flush drops
-/// only the new track's opening, which is replayed from 0 afterwards.
+/// the AirPlay latency (measured at startup). Segments never pause Music:
+/// a pause longer than a few seconds leaves ControlBooth's shairport-sync
+/// holding a dead session, after which Music can't resume or reconnect
+/// ("The network connection was reset"). Instead, once the *next* track has
+/// run for just under the latency (the old song has played out), the mixer
+/// mutes the music, the segment speaks, Music seeks that track back to 0 one
+/// latency before the voice ends, and the music is unmuted as the voice ends.
 @MainActor
 final class Director {
     struct Options {
@@ -45,9 +47,18 @@ final class Director {
     private var talkOverGeneration = 0
     private var talkOverStarted = false
     private var trackStartedAt: [String: Date] = [:]
-    private var pending: PendingSegment?
+    /// The current song gets a talk-over, written once it's close to its end
+    /// (so the time and temperature in it are current).
+    private var talkOverDue = false
+    /// When Music was first seen not playing outside a segment (watchdog).
+    private var musicStoppedSince: Date?
+    private var talkOverRequested = false
+    /// Music-stopping segments waiting for a song boundary, in due order.
+    private var pending: [PendingSegment] = []
     private var firedClockKeys = Set<String>()
     private var signalSources: [DispatchSourceSignal] = []
+    /// Music.app's AirPlay selection before the station took it over.
+    private var previousAirPlayDevices: [String] = []
 
     init(config: StationConfig, options: Options) {
         self.config = config
@@ -78,13 +89,13 @@ final class Director {
         if options.controlMusic {
             relay.set(true)
             Log.info("AirPlay relay on (ControlBooth → udp:\(config.ports.musicIn))")
+            previousAirPlayDevices = music.selectedAirPlayDevices()
             try music.selectAirPlayDevice(named: config.airPlayDeviceName)
             graph.armSoundDetector()
-            let playAt = Date()
             try music.play(playlist: config.playlist, shuffle: config.shuffle)
             Log.info("Music.app → AirPlay '\(config.airPlayDeviceName)', playlist '\(config.playlist)'"
                      + (config.shuffle ? " (shuffle)" : ""))
-            await measureLatency(since: playAt)
+            await measureLatency()
         }
         if let segment = options.fireAtStart {
             queue(segment, due: Date())
@@ -112,9 +123,23 @@ final class Director {
         shutdown()
     }
 
-    /// Time from Music.app `play` to sound at the mixer. Falls back to the
-    /// configured value if nothing arrives (relay off, wrong AirPlay device…).
-    private func measureLatency(since playAt: Date) async {
+    /// Time from Music.app's playhead to sound at the mixer: the first sound
+    /// minus the moment the playhead was at 0. Waits for Music to report
+    /// "playing" first — connecting to the AirPlay receiver can take 30 s.
+    /// Falls back to the configured value if nothing arrives.
+    private func measureLatency() async {
+        var trackZeroAt: Date?
+        for _ in 0..<150 where trackZeroAt == nil {
+            if let s = try? music.state(), s.playing {
+                trackZeroAt = Date().addingTimeInterval(-s.position)
+            } else {
+                try? await Task.sleep(for: .milliseconds(200))
+            }
+        }
+        guard let playAt = trackZeroAt else {
+            Log.info("Music.app didn't start playing within 30s; using \(latency)s")
+            return
+        }
         for _ in 0..<40 {
             if let at = graph.firstSoundAt {
                 let measured = at.timeIntervalSince(playAt)
@@ -136,6 +161,11 @@ final class Director {
         Log.info("shutting down")
         if options.controlMusic {
             try? music.pause()
+            // Switching away makes Music close its ControlBooth session
+            // cleanly instead of leaving it idle and paused.
+            if !previousAirPlayDevices.isEmpty, previousAirPlayDevices != [config.airPlayDeviceName] {
+                try? music.selectAirPlayDevices(named: previousAirPlayDevices)
+            }
             relay.set(false)
             Thread.sleep(forTimeInterval: 0.3)     // let the relay-off land before 6031 closes
         }
@@ -171,10 +201,27 @@ final class Director {
         if let track = state.track, track != currentTrack {
             trackChanged(to: track)
         }
+        if options.controlMusic && pending.isEmpty {
+            if state.playing {
+                musicStoppedSince = nil
+            } else if let since = musicStoppedSince {
+                if Date().timeIntervalSince(since) > 8 {
+                    Log.info("watchdog: Music.app isn't playing; restarting it")
+                    musicStoppedSince = nil
+                    try music.resume(playlist: config.playlist, shuffle: config.shuffle)
+                }
+            } else {
+                musicStoppedSince = Date()
+            }
+        }
 
-        if let segment = pending {
+        if let segment = pending.first {
             try await handlePending(segment, state: state)
             return
+        }
+        if talkOverDue, !talkOverRequested, let track = currentTrack, state.playing,
+           state.remaining + latency < 45 {
+            requestTalkOver(for: track)
         }
         // An unready clip just misses this song.
         guard state.playing, !talkOverStarted, let clip = talkOverClip else { return }
@@ -219,11 +266,12 @@ final class Director {
         if segment == .stationID {
             // Talked over the end of the current song, like any talk-over.
             prepareTalkOver { await clip.value }
+            talkOverDue = false          // the ID replaces this song's talk-over
             if !options.controlMusic {
                 Task { if let c = await clip.value { await announcer.play(c) } }
             }
         } else {
-            pending = PendingSegment(segment: segment, due: due, clip: clip)
+            pending.append(PendingSegment(segment: segment, due: due, clip: clip))
         }
     }
 
@@ -235,11 +283,14 @@ final class Director {
         if options.announceToAntennaHead {
             AntennaHeadLink.nowPlaying("\(track.name) — \(track.artist)", source: config.antennaHeadSourceName)
         }
+        prepareTalkOver { nil }
         let every = config.talkOverEvery
-        guard pending == nil, every > 0, songCount % every == 0 else {
-            prepareTalkOver { nil }
-            return
-        }
+        talkOverDue = pending.isEmpty && every > 0 && songCount % every == 0
+        talkOverRequested = false
+    }
+
+    private func requestTalkOver(for track: MusicPlayer.Track) {
+        talkOverRequested = true
         let upNext = music.upNext()
         prepareTalkOver { [weak self] in
             guard let self else { return nil }
@@ -273,39 +324,43 @@ final class Director {
         let overdue = state.playing && waited > config.maxSegmentWaitSeconds
 
         if state.playing && !newTrackSettled && !overdue { return }
-        pending = nil
+        // Music not started yet (AirPlay still connecting): hold the segment.
+        if options.controlMusic && !state.playing && currentTrack == nil && waited < 60 { return }
+        pending.removeFirst()
         prepareTalkOver { nil }
+        talkOverDue = false
 
-        if options.controlMusic && state.playing {
+        let musicWasPlaying = options.controlMusic && state.playing
+        if musicWasPlaying {
             if overdue {
                 Log.info("segment overdue by \(Int(waited))s; fading the music")
                 await graph.fadeMusic(to: 0, over: 2)
-                // The fade happened mid-song: skip on to a fresh track.
-                try music.pause()
-                try music.skipPaused()
-                try await Task.sleep(for: .milliseconds(300))
-                graph.setMusicGain(1)
+                try music.nextTrack()
             } else {
-                try music.rewindPaused()      // the new track's flushed opening replays from 0
+                graph.setMusicGain(0)       // mutes the new track's opening
             }
         }
         if options.announceToAntennaHead {
             AntennaHeadLink.nowPlaying("\(config.stationName) — \(segment.segment == .weather ? "Weather" : "News")",
                                        source: config.antennaHeadSourceName)
         }
-        guard let clip = await segment.clip.value else {
-            if options.controlMusic { try music.play() }
-            return
+        let clip = await segment.clip.value
+        let duration = clip?.duration ?? 0
+        // Seek back to 0 one latency before the voice ends, so the song's
+        // start reaches the mixer just as the voice finishes; unmute then.
+        let seekAfter = max(0, duration - latency)
+        let seekTask = Task { @MainActor [music] in
+            try? await Task.sleep(for: .seconds(seekAfter))
+            if musicWasPlaying { try? music.seekToStart() }
         }
-        // Resume Music early by the AirPlay latency so it arrives as the voice ends.
-        let resumeAfter = max(0, clip.duration - latency + 0.3)
-        let controlMusic = options.controlMusic
-        let resume = Task { @MainActor [music] in
-            try? await Task.sleep(for: .seconds(resumeAfter))
-            if controlMusic { try? music.play() }
+        if let clip { await announcer.play(clip) }
+        _ = await seekTask.value
+        let unmuteIn = seekAfter + latency - duration
+        if unmuteIn > 0 { try? await Task.sleep(for: .seconds(unmuteIn)) }
+        graph.setMusicGain(1)
+        if options.controlMusic && !musicWasPlaying {
+            try? music.resume(playlist: config.playlist, shuffle: config.shuffle)
         }
-        await announcer.play(clip)
-        _ = await resume.value
         currentTrack = nil      // re-announce the track to Now Playing
         songCount = 0
     }

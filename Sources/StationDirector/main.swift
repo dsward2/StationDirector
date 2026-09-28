@@ -58,6 +58,7 @@ do {
                                        fireAtStart: fire,
                                        runMinutes: take("--minutes").flatMap(Double.init))
         try await Director(config: config, options: options).run()
+        exit(0)
     case "preview":
         let options = Director.Options(output: .udp(port: 0), announceToAntennaHead: false,
                                        controlMusic: false, fireAtStart: nil, runMinutes: nil)

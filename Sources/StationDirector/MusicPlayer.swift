@@ -44,6 +44,10 @@ final class MusicPlayer {
     }
 
     func play(playlist: String, shuffle: Bool) throws {
+        let count = try run("tell application \"Music\" to return count of tracks of playlist \"\(escape(playlist))\"")
+        guard (Int(count) ?? 0) > 0 else {
+            throw DirectorError("playlist '\(playlist)' is empty or missing")
+        }
         try run("""
         tell application "Music"
             set shuffle enabled to \(shuffle)
@@ -53,28 +57,45 @@ final class MusicPlayer {
     }
 
     func play() throws { try run(#"tell application "Music" to play"#) }
+
+    /// Plays on from a pause, or starts the playlist over if Music has
+    /// stopped (a plain `play` does nothing with no current track).
+    func resume(playlist: String, shuffle: Bool) throws {
+        let state = try run(#"tell application "Music" to return player state as text"#)
+        if state == "stopped" {
+            try play(playlist: playlist, shuffle: shuffle)
+        } else {
+            try play()
+        }
+    }
     func pause() throws { try run(#"tell application "Music" to pause"#) }
 
-    /// Rewinds to the start of the current track and leaves Music paused.
-    func rewindPaused() throws {
-        try run("""
-        tell application "Music"
-            pause
-            set player position to 0
-        end tell
-        """)
+    /// Seeks the playing track back to its start (Music keeps playing, so
+    /// the AirPlay session stays up — see Director).
+    func seekToStart() throws {
+        try run(#"tell application "Music" to set player position to 0"#)
     }
 
-    /// Moves to the next track and leaves Music paused at its start.
-    func skipPaused() throws {
-        try run("""
+    func nextTrack() throws { try run(#"tell application "Music" to next track"#) }
+
+    /// Names of the currently selected AirPlay devices, one per line.
+    func selectedAirPlayDevices() -> [String] {
+        let script = """
         tell application "Music"
-            pause
-            next track
-            pause
-            set player position to 0
+            set out to {}
+            repeat with d in (current AirPlay devices)
+                set end of out to name of d
+            end repeat
+            set AppleScript's text item delimiters to linefeed
+            return out as text
         end tell
-        """)
+        """
+        return ((try? run(script)) ?? "").split(separator: "\n").map(String.init)
+    }
+
+    func selectAirPlayDevices(named names: [String]) throws {
+        let list = names.map { "AirPlay device \"\(escape($0))\"" }.joined(separator: ", ")
+        try run("tell application \"Music\" to set current AirPlay devices to {\(list)}")
     }
 
     /// The upcoming track, when it's knowable: playlist order, shuffle off.

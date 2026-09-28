@@ -36,11 +36,20 @@ Differences from the design doc:
   **Receiving** (not "Receiving & Relayed", which would announce "AirPlay
   Receiver" to AntennaHead). The director sends `relay on` to the relay's
   control port (6029) once 6031 is listening, and `relay off` before it exits.
-- **AirPlay latency is measured** at startup: the time from Music `play` to
-  the first sound at the mixer. Talk-over timing uses it. Pausing Music for a
-  segment flushes shairport-sync's buffer, so a segment pauses about one
-  latency into the *next* track (the old song has played out), rewinds that
-  track to 0, speaks, and resumes Music one latency before the voice ends.
+- **AirPlay latency is measured** at startup: the time from Music's playhead
+  at 0 to the first sound at the mixer (1.4 s on the Mac mini). Talk-over timing
+  uses it, and talk-over lines are written about 45 s before the song ends, so
+  the time in them is current.
+- **Segments never pause Music.** If Music pauses an AirPlay stream to
+  ControlBooth for more than a few seconds, shairport-sync keeps a dead
+  session: Music can't resume or reconnect ("The network connection was
+  reset"), and the receiver has to be restarted (ControlBooth › AirPlay
+  Receiver › Not in Use, Save, then Receiving, Save). So at the first song boundary after a
+  segment is due, the mixer mutes the music. The segment speaks while Music
+  plays on silently. One latency before the voice ends, Music seeks the track
+  back to 0, and the music is unmuted as the voice ends. At shutdown the director
+  pauses Music and switches its output back to the devices selected before,
+  so Music closes the session.
 
 ## One-time setup
 
@@ -72,4 +81,8 @@ station-director say --config station.json "Testing one two"  # into a running s
   and ControlBooth's relay sender exits on its next send to the closed 6031.
   Re-select the AirPlay mode in ControlBooth to restart it.
 - `upNext` (introducing the next song) works only with shuffle off.
+- Taking over AntennaHead's 6019 receiver stops whatever ControlBooth pipeline
+  was playing there (its PCMUDPSender exits). Restart it after the station.
+- A segment due while a very long track is playing waits up to
+  `maxSegmentWaitSeconds`, then fades the music and skips to the next track.
 - The ControlBooth UI doesn't know the relay was switched on from outside.
