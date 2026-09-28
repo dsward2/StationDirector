@@ -74,6 +74,16 @@ public final class Director {
     private let relay: MusicRelay?
 
     private var stopping = false
+    /// Thrown inside `start()` when a stop arrives mid-startup, so the
+    /// director goes straight to `shutdown()` instead of finishing startup
+    /// (picking the AirPlay device, starting the playlist, waiting up to ~40 s
+    /// for sound) — a pipeline taking AntennaHead's input shouldn't leave
+    /// Music playing and the relay on for minutes.
+    private struct StopRequested: Error {}
+
+    private func checkStop() throws {
+        if stopping { throw StopRequested() }
+    }
     private var fatal: String?
     private var currentTrack: MusicPlayer.Track?
     private var songCount = 0
@@ -162,6 +172,10 @@ public final class Director {
         failure = nil
         do {
             try await start()
+        } catch is StopRequested {
+            Log.info("stopped during startup")
+            await shutdown()
+            return
         } catch {
             failure = "\(error)"
             await shutdown()
@@ -194,26 +208,31 @@ public final class Director {
             try await Task.detached(priority: .userInitiated) { try AntennaHeadLink.startListening(name) }.value
             Log.info("AntennaHead is listening to '\(config.antennaHeadSourceName)'")
         }
+        try checkStop()
         graph.onExit = { [weak self] reason in
             Task { @MainActor in self?.fatal = reason }
         }
         if options.controlMusic, let relay {
             await relay.prepare(port: config.ports.musicIn)
         }
+        try checkStop()
         try graph.start()
         try await Task.sleep(for: .milliseconds(300))
+        try checkStop()
 
         if options.controlMusic {
             relay?.setRelay(true)
             Log.info("AirPlay relay on (ControlBooth → udp:\(config.ports.musicIn))")
             previousAirPlayDevices = music.selectedAirPlayDevices()
             try await selectAirPlayDevice()
+            try checkStop()
             graph.armSoundDetector()
             try music.play(playlist: config.playlist, shuffle: config.shuffle)
             Log.info("\(music.target.displayName) → AirPlay '\(config.airPlayDeviceName)', playlist '\(config.playlist)'"
                      + (config.shuffle ? " (shuffle)" : ""))
             await measureLatency()
         }
+        try checkStop()
         if let segment = options.fireAtStart {
             queue(segment, due: Date())
         } else {
@@ -232,6 +251,7 @@ public final class Director {
     private func selectAirPlayDevice() async throws {
         var lastError: Error?
         for _ in 0..<30 {
+            try checkStop()
             do {
                 try music.selectAirPlayDevice(named: config.airPlayDeviceName)
                 return
@@ -254,18 +274,19 @@ public final class Director {
     /// Falls back to the configured value if nothing arrives.
     private func measureLatency() async {
         var trackZeroAt: Date?
-        for _ in 0..<150 where trackZeroAt == nil {
+        for _ in 0..<150 where trackZeroAt == nil && !stopping {
             if let s = try? music.state(), s.playing {
                 trackZeroAt = Date().addingTimeInterval(-s.position)
             } else {
                 try? await Task.sleep(for: .milliseconds(200))
             }
         }
+        guard !stopping else { return }
         guard let playAt = trackZeroAt else {
             Log.info("Music.app didn't start playing within 30s; using \(latency)s")
             return
         }
-        for _ in 0..<40 {
+        for _ in 0..<40 where !stopping {
             if let at = graph.firstSoundAt {
                 let measured = at.timeIntervalSince(playAt)
                 if (0.3...6).contains(measured) {
@@ -278,6 +299,7 @@ public final class Director {
             }
             try? await Task.sleep(for: .milliseconds(200))
         }
+        guard !stopping else { return }
         Log.info("no music reached the mixer within 8s — check ControlBooth's AirPlay port (\(config.ports.musicIn)) "
                  + "and that Music.app is playing to '\(config.airPlayDeviceName)'; using \(latency)s")
     }
