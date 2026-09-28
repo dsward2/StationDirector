@@ -1,0 +1,22 @@
+{
+  "stationName": "AntennaHead Radio",
+  "slogan": "your station, on your own terms",
+  "playlist": "Recently Added",
+  "shuffle": true,
+  "airPlayDeviceName": "ControlBooth",
+  "latitude": 34.7465,
+  "longitude": -92.2896,
+  "newsFeeds": [
+    "https://feeds.npr.org/1001/rss.xml",
+    "https://www.kark.com/feed/"
+  ],
+  "headlineCount": 3,
+  "voice": "com.apple.voice.premium.en-US.Ava",
+  "talkOverEvery": 1,
+  "useAI": true,
+  "clock": [
+    { "minute": 0,  "segment": "topOfHour" },
+    { "minute": 30, "segment": "weather" }
+  ],
+  "speechSynthPath": "../PipelineHelpers/.build/release/PCMSpeechSynth"
+}
