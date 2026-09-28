@@ -4,11 +4,11 @@ import Darwin
 /// Loopback UDP sender. Unconnected `sendto`, so a port nobody is bound to
 /// just drops the datagram instead of failing later sends (unlike
 /// PCMUDPSender, which exits on ECONNREFUSED).
-final class UDPOut {
+public final class UDPOut {
     private let fd: Int32
     private var address = sockaddr_in()
 
-    init(host: String = "127.0.0.1", port: UInt16) {
+    public init(host: String = "127.0.0.1", port: UInt16) {
         fd = socket(AF_INET, SOCK_DGRAM, 0)
         address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
         address.sin_family = sa_family_t(AF_INET)
@@ -20,7 +20,7 @@ final class UDPOut {
 
     /// Sends `data` in datagrams of at most `maxDatagram` bytes (2048 matches
     /// PCMUDPSender/PCMMixer; keep it a multiple of the 4-byte stereo frame).
-    func send(_ data: Data, maxDatagram: Int = 2048) {
+    public func send(_ data: Data, maxDatagram: Int = 2048) {
         data.withUnsafeBytes { raw in
             guard let base = raw.baseAddress else { return }
             var offset = 0
@@ -36,7 +36,7 @@ final class UDPOut {
         }
     }
 
-    func send(_ text: String) { send(Data(text.utf8)) }
+    public func send(_ text: String) { send(Data(text.utf8)) }
 }
 
 /// The station's audio graph, built from AntennaHead's own helpers:
@@ -50,8 +50,8 @@ final class UDPOut {
 /// The director forwards the mixer's output itself (rather than PCMMixer
 /// `--output udp:`) so AntennaHead closing its receiver doesn't kill the
 /// station — PCMMixer exits on the first failed send.
-final class AudioGraph {
-    enum Output {
+public final class AudioGraph {
+    public enum Output: Sendable {
         case udp(port: UInt16)
         case file(URL)
     }

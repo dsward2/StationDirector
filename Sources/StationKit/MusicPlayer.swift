@@ -3,7 +3,39 @@ import Foundation
 /// Music.app over AppleScript. The first call triggers macOS's one-time
 /// Automation consent prompt for whatever app runs this CLI (Terminal, …).
 @MainActor
-final class MusicPlayer {
+public final class MusicPlayer {
+    public init() {}
+
+    /// Names of the user's playlists that have tracks, for a settings picker.
+    public func playlistNames() -> [String] {
+        let script = """
+        tell application "Music"
+            set out to {}
+            repeat with p in user playlists
+                if (count of tracks of p) > 0 then set end of out to name of p
+            end repeat
+            set AppleScript's text item delimiters to linefeed
+            return out as text
+        end tell
+        """
+        return ((try? run(script)) ?? "").split(separator: "\n").map(String.init)
+    }
+
+    /// Names of every AirPlay device Music.app can see.
+    public func airPlayDeviceNames() -> [String] {
+        let script = """
+        tell application "Music"
+            set out to {}
+            repeat with d in AirPlay devices
+                set end of out to name of d
+            end repeat
+            set AppleScript's text item delimiters to linefeed
+            return out as text
+        end tell
+        """
+        return ((try? run(script)) ?? "").split(separator: "\n").map(String.init)
+    }
+
     struct Track: Equatable {
         let id: String
         let name: String
@@ -114,10 +146,22 @@ final class MusicPlayer {
         return (fields[0], fields[1])
     }
 
+    /// Compiled scripts, by source: `state()` runs four times a second, and
+    /// compiling is most of an NSAppleScript call's cost.
+    private var compiled: [String: NSAppleScript] = [:]
+
     @discardableResult
     private func run(_ source: String) throws -> String {
         var error: NSDictionary?
-        guard let script = NSAppleScript(source: source) else { throw DirectorError("bad AppleScript") }
+        let script: NSAppleScript
+        if let cached = compiled[source] {
+            script = cached
+        } else {
+            guard let fresh = NSAppleScript(source: source) else { throw DirectorError("bad AppleScript") }
+            fresh.compileAndReturnError(nil)
+            if compiled.count < 32 { compiled[source] = fresh }
+            script = fresh
+        }
         let result = script.executeAndReturnError(&error)
         if let error {
             throw DirectorError("Music.app: \(error[NSAppleScript.errorMessage] ?? error)")

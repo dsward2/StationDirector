@@ -1,4 +1,5 @@
 import Foundation
+import StationKit
 
 let usage = """
 station-director — AntennaHead station automation (first-hour prototype)
@@ -57,12 +58,22 @@ do {
                                        controlMusic: !takeFlag("--no-music"),
                                        fireAtStart: fire,
                                        runMinutes: take("--minutes").flatMap(Double.init))
-        try await Director(config: config, options: options).run()
+        let director = Director(config: config, options: options,
+                                relay: UDPRelayControl(port: config.ports.airPlayRelayControl))
+        // Ctrl-C / kill: stop cleanly (Music, the relay, AntennaHead's source).
+        var signalSources: [DispatchSourceSignal] = []
+        for sig in [SIGINT, SIGTERM] {
+            signal(sig, SIG_IGN)
+            let source = DispatchSource.makeSignalSource(signal: sig, queue: .main)
+            source.setEventHandler { MainActor.assumeIsolated { director.stop() } }
+            source.resume()
+            signalSources.append(source)
+        }
+        try await director.run()
         exit(0)
     case "preview":
-        let options = Director.Options(output: .udp(port: 0), announceToAntennaHead: false,
-                                       controlMusic: false, fireAtStart: nil, runMinutes: nil)
-        await Director(config: config, options: options).preview()
+        let options = Director.Options(output: .udp(port: 0), announceToAntennaHead: false, controlMusic: false)
+        print(await Director(config: config, options: options, relay: nil).preview())
     case "say":
         let text = args.joined(separator: " ")
         guard !text.isEmpty else { throw DirectorError("say: no text") }
