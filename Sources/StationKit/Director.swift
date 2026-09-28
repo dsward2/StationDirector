@@ -549,19 +549,3 @@ public final class Director {
         return out
     }
 }
-
-enum SpokenTime {
-    /// "4:15", or "5 o'clock" on the hour.
-    static func clock(_ date: Date) -> String {
-        let c = Calendar.current.dateComponents([.hour, .minute], from: date)
-        let h = (c.hour! + 11) % 12 + 1
-        return c.minute! == 0 ? "\(h) o'clock" : String(format: "%d:%02d", h, c.minute!)
-    }
-
-    /// The hour for a top-of-hour ID: "5 o'clock", or the half past it rounds to.
-    static func hour(_ date: Date) -> String {
-        let c = Calendar.current.dateComponents([.hour, .minute], from: date)
-        let rounded = c.minute! >= 30 ? c.hour! + 1 : c.hour!
-        return "\((rounded + 11) % 12 + 1) o'clock"
-    }
-}

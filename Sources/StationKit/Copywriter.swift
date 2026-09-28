@@ -5,7 +5,7 @@ import FoundationModels
 struct Facts {
     var stationName: String
     var slogan: String
-    var time: String                    // "4:15"
+    var time: String                    // "4:15 PM"
     var city: String?
     var temperatureF: Int?
     var conditions: String?
@@ -63,7 +63,7 @@ final class Copywriter {
             Write what the DJ says over the last seconds of the ending song, in one or two complete, \
             conversational sentences (at most 22 words in all). Name the ending song and its artist, then add \
             one of: the time, the temperature, or the station name. If a next song is listed, introduce it too. \
-            Style example with made-up facts: "That was Morning Rain from the Blue Lanterns. It's 9:40, \
+            Style example with made-up facts: "That was Morning Rain from the Blue Lanterns. It's 9:40 PM, \
             and sixty-one degrees out there on Radio Example."
             """)
     }
