@@ -97,6 +97,10 @@ public final class Director {
     private var talkOverDue = false
     /// When Music was first seen not playing outside a segment (watchdog).
     private var musicStoppedSince: Date?
+    /// When ticks started failing with a transient remote-music error, and
+    /// whether that run of failures has been logged yet.
+    private var tickFailingSince: Date?
+    private var tickFailureLogged = false
     private var talkOverRequested = false
     /// Music-stopping segments waiting for a song boundary, in due order.
     private var pending: [PendingSegment] = []
@@ -188,6 +192,17 @@ public final class Director {
             if let minutes = options.runMinutes, Date().timeIntervalSince(started) > minutes * 60 { break }
             do {
                 try await tick()
+                if tickFailureLogged { Log.info("tick: \(music.target.displayName) is answering again") }
+                tickFailingSince = nil
+                tickFailureLogged = false
+            } catch let error as DirectorError where error.isTransient {
+                // One refused poll is noise; log only when it lasts 2 s.
+                let since = tickFailingSince ?? Date()
+                tickFailingSince = since
+                if !tickFailureLogged, Date().timeIntervalSince(since) >= 2 {
+                    Log.info("tick: \(error)")
+                    tickFailureLogged = true
+                }
             } catch {
                 Log.info("tick: \(error)")
             }
