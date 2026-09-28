@@ -123,12 +123,11 @@ final class Copywriter {
         let plain = headline.hasSuffix(".") || headline.hasSuffix("?") || headline.hasSuffix("!") ? headline : headline + "."
         guard useAI else { return plain }
         let prompt = """
-            Rewrite this news headline as one complete spoken sentence for a radio newscast, the way a \
-            newsreader would say it. Keep every name, place and number in it. Do not add names, numbers, \
-            places or details that are not in the headline.
+            Rewrite this headline as one complete spoken sentence. Keep every name, place and number in it. \
+            Do not add names, numbers, places or details that are not in the headline.
             Headline: \(headline)
             """
-        guard let line = await generate(prompt), grounded(line, in: headline) else { return plain }
+        guard let line = await generate(prompt, headline: true), grounded(line, in: headline) else { return plain }
         return line
     }
 
@@ -143,7 +142,18 @@ final class Copywriter {
         return line
     }
 
-    private func generate(_ prompt: String) async -> String? {
+    /// Headlines use the `.permissiveContentTransformations` guardrails:
+    /// with the default ones the model refused about half of ordinary news
+    /// headlines (war, crime, politics) as "May contain sensitive content".
+    /// That mode only applies to plain `String` responses, so headlines skip
+    /// the `AnnouncerLine` structure; `grounded(_:in:)` still checks the line.
+    private static let headlineInstructions = """
+        You rewrite news headlines as sentences a radio newsreader speaks. Reply with the sentence only: \
+        no greeting, no station name, no introduction such as "Here is the news", no quotation marks. \
+        Use only the facts in the headline.
+        """
+
+    private func generate(_ prompt: String, headline: Bool = false) async -> String? {
         let instructions = """
             You are the announcer on a small personal radio station. You write short, warm, natural lines \
             to be read aloud by a speech synthesizer. Use ONLY the facts you are given. Never add trivia, \
@@ -153,9 +163,18 @@ final class Copywriter {
         return await withTaskGroup(of: String?.self) { group in
             group.addTask {
                 do {
+                    if headline {
+                        let model = SystemLanguageModel(guardrails: .permissiveContentTransformations)
+                        let session = LanguageModelSession(model: model, instructions: Self.headlineInstructions)
+                        let reply = try await session.respond(to: prompt)
+                        return reply.content.trimmingCharacters(in: .whitespacesAndNewlines)
+                    }
                     let session = LanguageModelSession(instructions: instructions)
                     let reply = try await session.respond(to: prompt, generating: AnnouncerLine.self)
                     return reply.content.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                } catch LanguageModelSession.GenerationError.guardrailViolation, LanguageModelSession.GenerationError.refusal {
+                    Log.info("copy: Apple's content filter declined a model line; using the plain text")
+                    return nil
                 } catch {
                     Log.info("copy: model error: \(error)")
                     return nil
@@ -175,8 +194,13 @@ final class Copywriter {
     /// starting a sentence, must appear in the source facts. Catches invented
     /// names, places, years and chart claims; lets ordinary wording through.
     func grounded(_ line: String, in source: String) -> Bool {
-        let haystack = source.lowercased()
-        let words = line.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }
+        // Feeds use curly apostrophes and quotes; the model writes straight ones.
+        func straightened(_ s: String) -> String {
+            s.replacingOccurrences(of: "[\u{2018}\u{2019}]", with: "'", options: .regularExpression)
+                .replacingOccurrences(of: "[\u{201C}\u{201D}]", with: "\"", options: .regularExpression)
+        }
+        let haystack = straightened(source).lowercased()
+        let words = straightened(line).components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }
         var sentenceStart = true
         for raw in words {
             let word = raw.trimmingCharacters(in: .punctuationCharacters.union(.symbols))
