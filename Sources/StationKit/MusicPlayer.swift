@@ -308,7 +308,11 @@ public final class MusicPlayer {
         let hint: String?
         switch number {
         case -600:
-            hint = target.isRemote ? "\(target.appName) isn't open on \(host). Open it there; remote Apple Events can't launch it." : nil
+            // Remote Apple Events only reach apps owned by the account they
+            // signed in as, so an app open under another account (or with
+            // that account not logged in on the remote Mac's screen) looks
+            // exactly like one that isn't running.
+            hint = target.isRemote ? "\(host) found no \(target.appName) running for the account ControlBooth signs in as. Either \(target.appName) isn't open there (remote Apple Events can't launch it), or it's open under a different account — sign in with the account that's logged in on \(host) and running \(target.appName)." : nil
         case -905, -906, -1708:
             hint = !target.isRemote ? nil : "Couldn't reach \(host) over Remote Apple Events. On that Mac, turn on System Settings › General › Sharing › Remote Application Scripting, and check the host name."
         case -1712:
