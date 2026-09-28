@@ -1,54 +1,90 @@
 import Foundation
 
+/// A headline and the name of the feed it came from, for on-air attribution.
+public struct Headline: Equatable, Sendable {
+    public let title: String
+    public let source: String
+}
+
 /// Headlines from RSS 2.0 / Atom feeds, round-robin across feeds so one
 /// source doesn't take every slot.
+///
+/// A feed entry is a URL, optionally preceded by the name to credit on air:
+/// `NPR | https://feeds.npr.org/1001/rss.xml`. Without a name, the feed's own
+/// title is shortened ("NPR Topics: News" → "NPR").
 enum News {
-    static func headlines(feeds: [String], count: Int) async -> [String] {
-        var perFeed: [[String]] = []
-        for feed in feeds {
-            guard let url = URL(string: feed) else { continue }
+    static func headlines(feeds: [String], count: Int) async -> [Headline] {
+        var perFeed: [[Headline]] = []
+        for entry in feeds {
+            let (name, urlString) = parseEntry(entry)
+            guard let url = URL(string: urlString) else { continue }
             do {
                 var request = URLRequest(url: url, timeoutInterval: 15)
                 request.setValue("AntennaHead-StationDirector", forHTTPHeaderField: "User-Agent")
                 let (data, _) = try await URLSession.shared.data(for: request)
-                perFeed.append(FeedTitles.parse(data))
+                let feed = FeedTitles.parse(data)
+                let source = name ?? shortName(feed.channelTitle) ?? url.host() ?? "the wire"
+                perFeed.append(feed.titles.map { Headline(title: $0, source: source) })
             } catch {
-                Log.info("news: \(feed): \(error.localizedDescription)")
+                Log.info("news: \(urlString): \(error.localizedDescription)")
             }
         }
-        var out: [String] = []
+        var out: [Headline] = []
         var seen = Set<String>()
         var index = 0
         while out.count < count, perFeed.contains(where: { index < $0.count }) {
-            for titles in perFeed where index < titles.count && out.count < count {
-                let title = titles[index]
-                if seen.insert(title.lowercased()).inserted { out.append(title) }
+            for headlines in perFeed where index < headlines.count && out.count < count {
+                let headline = headlines[index]
+                if seen.insert(headline.title.lowercased()).inserted { out.append(headline) }
             }
             index += 1
         }
         return out
+    }
+
+    /// "NPR | https://…" → ("NPR", "https://…"); a bare URL has no name.
+    static func parseEntry(_ entry: String) -> (name: String?, url: String) {
+        let parts = entry.split(separator: "|", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
+        if parts.count == 2, !parts[0].isEmpty { return (parts[0], parts[1]) }
+        return (nil, entry.trimmingCharacters(in: .whitespaces))
+    }
+
+    /// A feed title shortened to something sayable: the part before ":",
+    /// " - ", " | " or " — ", without trailing "Topics", "News", "Headlines"….
+    static func shortName(_ title: String?) -> String? {
+        guard var name = title?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty else { return nil }
+        for separator in [":", " - ", " | ", " — ", " – "] {
+            if let r = name.range(of: separator) { name = String(name[..<r.lowerBound]) }
+        }
+        let filler: Set<String> = ["topics", "news", "headlines", "rss", "feed", "latest", "top", "stories"]
+        var words = name.split(separator: " ").map(String.init)
+        while words.count > 1, let last = words.last, filler.contains(last.lowercased()) { words.removeLast() }
+        name = words.joined(separator: " ").trimmingCharacters(in: .whitespaces)
+        return name.isEmpty ? nil : name
     }
 }
 
 /// Collects `<item><title>` (RSS) and `<entry><title>` (Atom) text.
 private final class FeedTitles: NSObject, XMLParserDelegate {
     private var titles: [String] = []
+    /// The feed's own `<title>` (the first one outside any item).
+    private var channelTitle: String?
     private var inItem = false
     private var inTitle = false
     private var text = ""
 
-    static func parse(_ data: Data) -> [String] {
+    static func parse(_ data: Data) -> (titles: [String], channelTitle: String?) {
         let delegate = FeedTitles()
         let parser = XMLParser(data: data)
         parser.delegate = delegate
         parser.parse()
-        return delegate.titles
+        return (delegate.titles, delegate.channelTitle)
     }
 
     func parser(_ parser: XMLParser, didStartElement name: String, namespaceURI: String?,
                 qualifiedName: String?, attributes: [String: String] = [:]) {
         if name == "item" || name == "entry" { inItem = true }
-        if inItem && name == "title" { inTitle = true; text = "" }
+        if name == "title" && (inItem || channelTitle == nil) { inTitle = true; text = "" }
     }
 
     func parser(_ parser: XMLParser, foundCharacters string: String) {
@@ -63,7 +99,11 @@ private final class FeedTitles: NSObject, XMLParserDelegate {
         if name == "title" && inTitle {
             inTitle = false
             let title = Self.decodeEntities(text).trimmingCharacters(in: .whitespacesAndNewlines)
-            if !title.isEmpty { titles.append(title) }
+            if inItem {
+                if !title.isEmpty { titles.append(title) }
+            } else if channelTitle == nil {
+                channelTitle = title
+            }
         }
         if name == "item" || name == "entry" { inItem = false }
     }
