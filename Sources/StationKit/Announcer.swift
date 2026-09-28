@@ -29,7 +29,7 @@ public final class Announcer {
         return try await Task.detached(priority: .userInitiated) {
             let process = Process()
             process.executableURL = URL(fileURLWithPath: config.helper("PCMSpeechSynth"))
-            var args = ["--text", text, "--rate", "\(AudioGraph.sampleRate)", "--no-pace"]
+            var args = ["--text", SpokenTime.speakable(text), "--rate", "\(AudioGraph.sampleRate)", "--no-pace"]
             if let voice = config.voice { args += ["--voice", voice] }
             if let rate = config.speechRate { args += ["--speech-rate", String(format: "%.3f", rate)] }
             if text.hasPrefix("<speak") { args.append("--ssml") }
