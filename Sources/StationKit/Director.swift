@@ -55,6 +55,13 @@ public final class Director {
     public private(set) var latency: Double
     /// Segments waiting for a song boundary.
     public var pendingSegments: [StationConfig.Segment] { pending.map(\.segment) }
+    /// A skip (gong, fade, next song) is in progress.
+    public private(set) var isSkipping = false
+    /// Whether `skip()` would do anything now: on air between segments, with
+    /// a song playing and the announcer not mid-line.
+    public var canSkip: Bool {
+        options.controlMusic && phase == .onAir && !isSkipping && !speaking && currentTrack != nil
+    }
     /// Why the station stopped on its own, if it did.
     public private(set) var failure: String?
 
@@ -105,6 +112,14 @@ public final class Director {
     /// Music-stopping segments waiting for a song boundary, in due order.
     private var pending: [PendingSegment] = []
     private var firedClockKeys = Set<String>()
+    /// The announcer input carries one clip at a time (two paced senders on
+    /// one UDP port would interleave), so speaking and skipping take turns.
+    private var speaking = false
+    /// Set by a skip that lands on a waiting segment: run it at once rather
+    /// than waiting for the new song to settle.
+    private var segmentBoundaryNow = false
+    /// Rendered off the main actor at startup, ready for the first skip.
+    private let gong = Task.detached(priority: .utility) { Clip(text: "(gong)", pcm: Gong.render()) }
     /// Music.app's AirPlay selection before the station took it over.
     private var previousAirPlayDevices: [String] = []
 
@@ -160,6 +175,15 @@ public final class Director {
         }
         stopping = true
         phase = .stopped
+    }
+
+    /// Skips the current song: a gong over the music while it fades out, then
+    /// the next song fades in as the gong rings. If a music-stopping segment
+    /// is waiting for the song to end, the skip goes straight to it instead.
+    public func skip() {
+        guard canSkip else { return }
+        isSkipping = true
+        Task { await performSkip() }
     }
 
     /// Runs `segment` now — at the next song boundary for the music-stopping
@@ -279,8 +303,49 @@ public final class Director {
     }
 
     private func speak(_ clip: Clip) async {
+        while isSkipping || speaking { try? await Task.sleep(for: .milliseconds(100)) }
+        speaking = true
+        defer { speaking = false }
         lastLine = clip.text
         await announcer.play(clip)
+    }
+
+    private func performSkip() async {
+        defer { isSkipping = false }
+        if let track = currentTrack { Log.info("skip: \(track.name) — \(track.artist)") }
+        // No talk-over for the song being skipped.
+        prepareTalkOver { nil }
+        talkOverStarted = true
+        talkOverDue = false
+
+        let gongClip = await gong.value
+        speaking = true
+        let ring = Task { @MainActor [announcer] in
+            await announcer.play(gongClip)
+            self.speaking = false
+        }
+        await graph.fadeMusic(to: 0, over: 1.5)
+        do {
+            try music.nextTrack()
+        } catch {
+            Log.info("skip: \(error)")
+            await graph.fadeMusic(to: 1, over: 1)
+            await ring.value
+            return
+        }
+        if !pending.isEmpty {
+            // The waiting segment takes this boundary: it keeps the music
+            // muted, speaks once the gong has rung out, then starts the new
+            // song from the top (see handlePending).
+            segmentBoundaryNow = true
+            await ring.value
+            return
+        }
+        // The new song reaches the mixer one AirPlay latency after the skip;
+        // bring it up under the ringing gong.
+        try? await Task.sleep(for: .seconds(max(0, latency - 0.3)))
+        await graph.fadeMusic(to: 1, over: 2.5)
+        await ring.value
     }
 
     /// Time from Music.app's playhead to sound at the mixer: the first sound
@@ -369,6 +434,7 @@ public final class Director {
             }
         }
 
+        if isSkipping { return }
         if let segment = pending.first {
             try await handlePending(segment, state: state)
             return
@@ -474,14 +540,17 @@ public final class Director {
     private func handlePending(_ segment: PendingSegment, state: MusicPlayer.State) async throws {
         let waited = Date().timeIntervalSince(segment.due)
         guard waited >= 0 else { return }
-        let newTrackSettled = state.playing && state.position >= latency - 0.25 && state.position < latency + 2
-            && currentTrackStartedAfter(segment.due)
+        let newTrackSettled = segmentBoundaryNow
+            || (state.playing && state.position >= latency - 0.25 && state.position < latency + 2
+                && currentTrackStartedAfter(segment.due))
         let overdue = state.playing && waited > config.maxSegmentWaitSeconds
 
         if state.playing && !newTrackSettled && !overdue { return }
         // Music not started yet (AirPlay still connecting): hold the segment.
         if options.controlMusic && !state.playing && currentTrack == nil && waited < 60 { return }
         pending.removeFirst()
+        let afterSkip = segmentBoundaryNow
+        segmentBoundaryNow = false
         prepareTalkOver { nil }
         talkOverDue = false
 
@@ -489,7 +558,9 @@ public final class Director {
         defer { if phase == .segment(segment.segment) { phase = .onAir } }
         let musicWasPlaying = options.controlMusic && state.playing
         if musicWasPlaying {
-            if overdue {
+            if afterSkip {
+                graph.setMusicGain(0)       // already faded out by the skip
+            } else if overdue {
                 Log.info("segment overdue by \(Int(waited))s; fading the music")
                 await graph.fadeMusic(to: 0, over: 2)
                 try music.nextTrack()
