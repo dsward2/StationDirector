@@ -125,7 +125,7 @@ public struct StationConfig: Codable, Equatable, Sendable {
             ClockEvent(minute: 30, segment: .weather),
         ],
         ports: Ports(musicIn: 6031, announcerIn: 6032, mixerControl: 6033,
-                     antennaHead: 6019, airPlayRelayControl: 6029),
+                     antennaHead: 6019, airPlayRelayControl: 6034),
         duck: Duck(threshold: 0.02, attenuation: 0.25, attackMs: 40, releaseMs: 400, holdMs: 250),
         helpersPath: "/Applications/AntennaHead.app/Contents/Helpers",
         speechSynthPath: nil,
