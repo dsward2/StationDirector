@@ -46,7 +46,7 @@ Differences from the design doc:
 - **AirPlay relay switched directly.** ControlBooth's AirPlay setting stays on
   **Receiving** (not "Receiving & Relayed", which would announce "AirPlay
   Receiver" to AntennaHead). The director sends `relay on` to the relay's
-  control port (6029) once 6031 is listening, and `relay off` before it exits.
+  control port (6034) once 6031 is listening, and `relay off` before it exits.
 - **AirPlay latency is measured** at startup: the time from Music's playhead
   at 0 to the first sound at the mixer (1.4 s on the Mac mini). Talk-over timing
   uses it, and talk-over lines are written about 45 s before the song ends, so
@@ -88,8 +88,10 @@ station-director say --config station.json "Testing one two"  # into a running s
 ## Known limits
 
 - If the director is killed without its Ctrl-C cleanup, the AirPlay relay stays on
-  and ControlBooth's relay sender exits on its next send to the closed 6031.
-  Re-select the AirPlay mode in ControlBooth to restart it.
+  and ControlBooth's relay keeps sending to the closed 6031 (the sender drops the
+  packets harmlessly since PipelineHelpers#21, so AirPlay stays connected, but
+  nothing hears the audio). Set ControlBooth's Destination Port back to 6019 or
+  restart the director.
 - `upNext` (introducing the next song) works only with shuffle off.
 - Taking over AntennaHead's 6019 receiver stops whatever ControlBooth pipeline
   was playing there (its PCMUDPSender exits). Restart it after the station.
